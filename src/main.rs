@@ -1,5 +1,99 @@
+pub use hashes::Hashes;
+use serde::{Deserialize, Serialize};
 use serde_json;
 use std::env;
+
+/// Metainfo files (aka .torrent files) bencoded dictionaries
+#[derive(Debug, Clone, Deserialize)]
+struct Torrent {
+    // Torrent File Structure.
+    // AKA metainfo file.
+    announce: String,
+    info: Info,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct Info {
+    /// The file name.
+    /// In single file case, it's the name of a file,
+    /// In multi file case, it's the name of a directory.
+    name: String,
+    /// piece length
+    #[serde(rename = "piece length")]
+    piece_length: usize,
+
+    //Each entry of `pieces` is the SHA1 hash of the piece at the corresponding index.
+    pieces: Hashes,
+
+    #[serde(flatten)]
+    key: Key,
+}
+
+/// There is either `length` or `files` as keys, but not both or neither.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+enum Key {
+    SingleFile { length: usize },
+    MultiFile { files: File },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct File {
+    length: usize,
+    path: Vec<String>,
+}
+
+mod hashes {
+    use serde::de::{self, Deserialize, Deserializer, Visitor};
+    use serde::ser::{Serialize, Serializer};
+    use std::fmt;
+
+    #[derive(Clone, Debug)]
+    pub struct Hashes(pub Vec<[u8; 20]>);
+    struct HashesVisitor;
+
+    impl<'de> Visitor<'de> for HashesVisitor {
+        type Value = Hashes;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("byte-string with length in multiple of 20.")
+        }
+
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if v.len() % 20 != 0 {
+                return Err(E::custom(format!("length is {}", v.len())));
+            }
+
+            Ok(Hashes(
+                v.chunks_exact(20)
+                    .map(|slice_20| slice_20.try_into().expect("Guaranteed to be len 20"))
+                    .collect(),
+            ))
+        }
+    }
+
+    impl<'de> Deserialize<'de> for Hashes {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_bytes(HashesVisitor)
+        }
+    }
+
+    impl Serialize for Hashes {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let single_slice = self.0.concat();
+            serializer.serialize_bytes(&single_slice)
+        }
+    }
+}
 
 fn decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
     match encoded_value.chars().next() {
